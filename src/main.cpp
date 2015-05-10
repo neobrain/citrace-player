@@ -2,6 +2,7 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -17,7 +18,8 @@
 #ifdef BOOST_NO_EXCEPTIONS
 namespace boost {
 void throw_exception(const std::exception& e) {
-    // Do notion. yay!
+    // Do nothing. yay!
+    // TODO: Find a nice way to cope with this.
 }
 }
 #endif
@@ -36,17 +38,17 @@ static uint32_t PhysicalToVirtualAddress(uint32_t physical_address) {
     if (physical_address >= 0x20000000 && physical_address < 0x28000000) {
         return physical_address - 0x20000000 + FCRAMStartVAddr();
     } else if (physical_address >= 0x14000000 && physical_address < 0x14F00000) {
-        // Erm... FCRAM. This is probably just a workaround for Citra's broken code.
+        // Erm... this is FCRAM, too. This is probably just a workaround for Citra's broken code.
         // TODO: Double check how necessary this is.
         return physical_address;
     } else if (physical_address >= 0x18000000 && physical_address < 0x18600000) {
         // VRAM
         return physical_address - 0x18000000 + VRAMStartVAddr();
     } else {
-        network_printf("Unknown physical address 0x%08x\n", physical_address);
-        TestExit();
+        NetworkPrint("Unknown physical address 0x%08x\n", physical_address);
+        NetworkExit();
         exit(1);
-		return 0;
+        return 0;
     }
 }
 
@@ -54,7 +56,8 @@ extern Handle gspGpuHandle;
 
 // Maps each pica register to the set of stateful (inactive) bytes
 // E.g. if bits 16-31 of a register are state and the others are active, the array contains the value "0xC = 0b1000+0b0100".
-static const auto pica_register_state_mask = []() {
+static const std::array<uint8_t, 0x300> pica_register_state_mask = []() {
+
     std::array<uint8_t, 0x300> ret{};
 
     // Explicitly initialize stateful registers
@@ -159,15 +162,16 @@ static const auto pica_register_state_mask = []() {
     return ret;
 }();
 
+
 int main() {
     // TODO: Evaluate if we should map the entire GSP heap manually here
 
     // TODO: Maybe we should setup a console first and tell the user that we're waiting for a
     //       network connection.
 
-    TestInit();
+    NetworkInit();
 
-    network_printf("Hello World!\n");
+    NetworkPrint("Hello World!\n");
 
     gspInit();
 
@@ -176,27 +180,27 @@ int main() {
     // Open input file; read and check header
     std::ifstream input("sdmc:/citrace.ctf");
     if (!input) {
-        network_printf("Failed to open input file sdmc:/citrace.ctf!\n");
-        TestExit();
+        NetworkPrint("Failed to open input file sdmc:/citrace.ctf!\n");
+        NetworkExit();
         return 1;
     }
 
     CiTrace::CTHeader header;
     input.read((char*)&header, sizeof(header));
     if (!input) {
-        network_printf("Failed to read CiTrace header!\n");
-        TestExit();
+        NetworkPrint("Failed to read CiTrace header!\n");
+        NetworkExit();
         return 1;
     }
 
-    if (0 != memcmp(header.magic, CiTrace::CTHeader::ExpectedMagicWord(), sizeof(header.magic))) {
-        network_printf("Invalid magic word: %c%c%c%c\n", header.magic[0], header.magic[1], header.magic[2], header.magic[3]);
-        TestExit();
+    if (0 != std::memcmp(header.magic, CiTrace::CTHeader::ExpectedMagicWord(), sizeof(header.magic))) {
+        NetworkPrint("Invalid magic word: %c%c%c%c\n", header.magic[0], header.magic[1], header.magic[2], header.magic[3]);
+        NetworkExit();
         return 1;
     }
 
     if (header.version != CiTrace::CTHeader::ExpectedVersion()) {
-        network_printf("Unsupported CiTrace version %d. This program only supports version %d CiTraces.\n",
+        NetworkPrint("Unsupported CiTrace version %d. This program only supports version %d CiTraces.\n",
                        header.version, CiTrace::CTHeader::ExpectedVersion());
     }
 
@@ -206,14 +210,12 @@ int main() {
     for (unsigned i = 0; i < header.stream_size; ++i)
         input.read((char*)&stream[i], sizeof(stream[i]));
 
-    network_printf("Successfully read input file\n");
+    NetworkPrint("Successfully read input file\n");
 
-    unsigned num_pica_registers = std::min<unsigned>(pica_register_state_mask.size(), header.initial_state_offsets.pica_registers_size);
-
-    // Create command list (aligned to 16 byte)
+    // Create command list buffer (aligned to 16 byte)
     std::vector<uint32_t, boost::alignment::aligned_allocator<uint32_t, 16>> command_list;
 
-    // Apply initial state..
+    // Helper lambda function used to queue commands for setting up initial state
     auto SubmitInternalMemory = [&](uint32_t file_offset, uint32_t num_words, uint32_t pica_register_id, bool is_float_uniform) {
         if (0 == num_words)
             return;
@@ -234,7 +236,6 @@ int main() {
                 // Read 4 24-bit values (all of which are 32-bit aligned)
                 uint32_t values[4];
                 input.read((char*)values, sizeof(values));
-                // TODO: Untested..
                 command_list.push_back((values[3] << 8) | ((values[2] >> 16) & 0xFF));
                 if (!command_written) {
                     command_list.push_back((pica_register_id + 1) | 0xF0000 | ((num_words / 4 * 3 - 1) << 20));
@@ -254,7 +255,6 @@ int main() {
             }
         }
     };
-
     SubmitInternalMemory(header.initial_state_offsets.gs_program_binary, header.initial_state_offsets.gs_program_binary_size, 0x29b, false);
     SubmitInternalMemory(header.initial_state_offsets.gs_swizzle_data,   header.initial_state_offsets.gs_swizzle_data_size,   0x2a5, false);
     SubmitInternalMemory(header.initial_state_offsets.gs_float_uniforms, header.initial_state_offsets.gs_float_uniforms_size, 0x290, true);
@@ -262,9 +262,11 @@ int main() {
     SubmitInternalMemory(header.initial_state_offsets.vs_swizzle_data,   header.initial_state_offsets.vs_swizzle_data_size,   0x2d5, false);
     SubmitInternalMemory(header.initial_state_offsets.vs_float_uniforms, header.initial_state_offsets.vs_float_uniforms_size, 0x2c0, true);
 
-    // Load pica registers.
-    // NOTE: Loading shader data and stuff might modify these, so we need to load them last.
+    // Load initial set of pica registers.
+    // NOTE: Loading shader data and stuff also needs to be done by writing pica registers,
+    //       which is why we set up this state last.
     input.seekg(header.initial_state_offsets.pica_registers);
+    unsigned num_pica_registers = std::min<unsigned>(pica_register_state_mask.size(), header.initial_state_offsets.pica_registers_size);
     for (unsigned regid = 0; regid < num_pica_registers; ++regid) {
         uint32_t value;
         input.read((char*)&value, sizeof(value));
@@ -290,7 +292,7 @@ int main() {
     gfxInitDefault(); // TODO: Setup framebuffer info instead, here!
     GPU_Init(NULL);   // TODO: This shouldn't be required for things to work.
 
-    network_printf("Initialization done, starting playback now\n");
+    NetworkPrint("Initialization done, starting playback now\n");
 
     while(aptMainLoop()) {
         hidScanInput();
@@ -298,10 +300,10 @@ int main() {
             break;
 
         GX_SetCommandList_Last(NULL, command_list.data(), command_list.size() * sizeof(uint32_t), 1);
-        network_printf("Initial playback GPU state setup done\n");
+        NetworkPrint("Initial playback GPU state setup done\n");
         // TODO: wait for completion of the command list
 
-        // Set up GPU registers
+        // Set up GPU registers - currently limited to the crucial ones
         // TODO: Setup all of them and not just a few ;)
         std::vector<uint32_t> gpu_regs(header.initial_state_offsets.gpu_registers_size);
         input.seekg(header.initial_state_offsets.gpu_registers);
@@ -319,13 +321,12 @@ int main() {
 
             switch (stream_element.type) {
             case CiTrace::FrameMarker:
-                network_printf("Reached end of current frame\n");
+                NetworkPrint("Reached end of current frame\n");
                 gfxSwapBuffersGpu();
                 gspWaitForEvent(GSPEVENT_VBlank0, true);
                 break;
 
             case CiTrace::MemoryLoad:
-            {
                 input.seekg(stream_element.memory_load.file_offset);
 
                 if (stream_element.memory_load.physical_address >= 0x18000000 && stream_element.memory_load.physical_address < 0x18600000) {
@@ -334,7 +335,7 @@ int main() {
                     // TODO: Guard against invalid inputs (e.g. invalid address or size)
 
                     static char buffer[1024];
-                    network_printf("Load 0x%x VRAM bytes from file offset 0x%x to 0x%08x (i.e. vaddr 0x%08x)\n",
+                    NetworkPrint("Load 0x%x VRAM bytes from file offset 0x%x to 0x%08x (i.e. vaddr 0x%08x)\n",
                                     stream_element.memory_load.size, stream_element.memory_load.file_offset,
                                     stream_element.memory_load.physical_address,
                                     PhysicalToVirtualAddress(stream_element.memory_load.physical_address));
@@ -344,7 +345,7 @@ int main() {
                          addr = stream_element.memory_load.physical_address;;
                          remaining -= sizeof(buffer), addr += sizeof(buffer)) {
                         auto size = std::min<size_t>(sizeof(buffer), remaining);
-                        network_printf("-> 0x%x to 0x%08x (i.e. vaddr 0x%08x)\n", (int)size, addr, PhysicalToVirtualAddress(addr));
+                        NetworkPrint("-> 0x%x to 0x%08x (i.e. vaddr 0x%08x)\n", (int)size, addr, PhysicalToVirtualAddress(addr));
                         input.read(buffer, size);
 
                         // TODO: Should this be size/4? Might be given in words..
@@ -355,14 +356,14 @@ int main() {
                             break;
                     }
                 } else {
-                    network_printf("Load 0x%x bytes from file offset 0x%x to 0x%08x (i.e. vaddr 0x%08x)\n",
+                    NetworkPrint("Load 0x%x bytes from file offset 0x%x to 0x%08x (i.e. vaddr 0x%08x)\n",
                                    stream_element.memory_load.size, stream_element.memory_load.file_offset,
                                    stream_element.memory_load.physical_address,
                                    PhysicalToVirtualAddress(stream_element.memory_load.physical_address));
 
                     uint8_t* dest = (uint8_t*)PhysicalToVirtualAddress(stream_element.memory_load.physical_address);
                     if (dest == nullptr) {
-                        network_printf("That turned out to be an unknown address\n");
+                        NetworkPrint("That turned out to be an unknown address\n");
                         break;
                     }
 
@@ -370,7 +371,6 @@ int main() {
                     GSPGPU_FlushDataCache(&gspGpuHandle, dest, stream_element.memory_load.size);
                 }
                 break;
-            }
 
             case CiTrace::RegisterWrite:
             {
@@ -403,12 +403,12 @@ int main() {
                         { 2, "Writing 0x%04x to register 0x%08x%s%s\n" },
                         { 4, "Writing 0x%08x to register 0x%08x%s%s\n" }
                     };
-                    network_printf(debug_strings.at(size),
+                    NetworkPrint(debug_strings.at(size),
                                    (uint32_t)(stream_element.register_write.value&0xFFFFFFFF),
                                    stream_element.register_write.physical_address - 0x10100000 + 0x1EC00000 - 0x1EB00000,
                                    register_name.empty() ? "" : " <-- ", register_name.c_str());
                 } else {
-                    network_printf("Writing 0x%08x%08x to register 0x%08x%s%s\n",
+                    NetworkPrint("Writing 0x%08x%08x to register 0x%08x%s%s\n",
                                    (uint32_t)(stream_element.register_write.value>>32),
                                    (uint32_t)(stream_element.register_write.value&0xFFFFFFFF),
                                    stream_element.register_write.physical_address - 0x10100000 + 0x1EC00000 - 0x1EB00000,
@@ -436,7 +436,7 @@ int main() {
                     stream_element.register_write.physical_address == 0x10400C18 ||
                     stream_element.register_write.physical_address == 0x104018F0) {
 
-                    network_printf("Waiting for operation to finish..\n");
+                    NetworkPrint("Waiting for operation to finish..\n");
                     uint32_t val = 1;
                     while(val & 1) {
                         GSPGPU_ReadHWRegs(&gspGpuHandle, stream_element.register_write.physical_address - 0x10100000 + 0x1EC00000 - 0x1EB00000, &val, 4);
@@ -446,7 +446,7 @@ int main() {
                 break;
             }
             default:
-                network_printf("Unknown stream element type %x", stream_element.type);
+                NetworkPrint("Unknown stream element type %x", stream_element.type);
                 goto exit;
                 break;
             }
@@ -456,7 +456,7 @@ int main() {
 exit:
     gfxExit();
 
-    TestExit();
+    NetworkExit();
 
     return 0;
 }

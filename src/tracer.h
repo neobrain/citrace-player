@@ -67,7 +67,7 @@ struct CTMemoryLoad {
     uint32_t file_offset;
     uint32_t size;
     uint32_t physical_address;
-	uint32_t pad;
+    uint32_t pad;
 };
 
 struct CTRegisterWrite {
