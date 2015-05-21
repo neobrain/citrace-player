@@ -13,7 +13,7 @@
 #include <3ds.h>
 
 #include "network.h"
-#include "tracer.h"
+#include "citrace.h"
 
 #ifdef BOOST_NO_EXCEPTIONS
 namespace boost {
@@ -255,12 +255,23 @@ int main() {
             }
         }
     };
-    SubmitInternalMemory(header.initial_state_offsets.gs_program_binary, header.initial_state_offsets.gs_program_binary_size, 0x29b, false);
-    SubmitInternalMemory(header.initial_state_offsets.gs_swizzle_data,   header.initial_state_offsets.gs_swizzle_data_size,   0x2a5, false);
-    SubmitInternalMemory(header.initial_state_offsets.gs_float_uniforms, header.initial_state_offsets.gs_float_uniforms_size, 0x290, true);
-    SubmitInternalMemory(header.initial_state_offsets.vs_program_binary, header.initial_state_offsets.vs_program_binary_size, 0x2cb, false);
-    SubmitInternalMemory(header.initial_state_offsets.vs_swizzle_data,   header.initial_state_offsets.vs_swizzle_data_size,   0x2d5, false);
-    SubmitInternalMemory(header.initial_state_offsets.vs_float_uniforms, header.initial_state_offsets.vs_float_uniforms_size, 0x2c0, true);
+    for (unsigned i = 0; i < header.initial_state_offsets.default_attributes_size / 4; ++i) {
+        command_list.push_back(i);
+        command_list.push_back(0x232 | 0xF0000 | (3 << 20)); // followed by 4 float24 values packed into 3 extra uint32_t parameters
+
+        uint32_t values[4];
+        input.seekg(header.initial_state_offsets.default_attributes);
+        input.read((char*)values, sizeof(values));
+        command_list.push_back((values[3] << 8) | ((values[2] >> 16) & 0xFF));
+        command_list.push_back(((values[2] & 0xFFFF) << 16) | ((values[1] >> 8) & 0xFFFF));
+        command_list.push_back(((values[1] & 0xFF) << 24) | (values[0] & 0xFFFFFF));
+    }
+    SubmitInternalMemory(header.initial_state_offsets.gs_program_binary,  header.initial_state_offsets.gs_program_binary_size,  0x29b, false);
+    SubmitInternalMemory(header.initial_state_offsets.gs_swizzle_data,    header.initial_state_offsets.gs_swizzle_data_size,    0x2a5, false);
+    SubmitInternalMemory(header.initial_state_offsets.gs_float_uniforms,  header.initial_state_offsets.gs_float_uniforms_size,  0x290, true);
+    SubmitInternalMemory(header.initial_state_offsets.vs_program_binary,  header.initial_state_offsets.vs_program_binary_size,  0x2cb, false);
+    SubmitInternalMemory(header.initial_state_offsets.vs_swizzle_data,    header.initial_state_offsets.vs_swizzle_data_size,    0x2d5, false);
+    SubmitInternalMemory(header.initial_state_offsets.vs_float_uniforms,  header.initial_state_offsets.vs_float_uniforms_size,  0x2c0, true);
 
     // Load initial set of pica registers.
     // NOTE: Loading shader data and stuff also needs to be done by writing pica registers,
